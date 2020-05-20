@@ -36,23 +36,45 @@ export const setSettings = settings => {
 }
 
 export const fetchNotes = () => {
+	const lastETag = store.state.sync.etag
+	const lastModified = store.state.sync.lastModified
+	const headers = {}
+	if (lastETag) {
+		headers['If-None-Match'] = lastETag
+	}
 	return axios
-		.get(url('/notes'))
+		.get(
+			url('/notes' + (lastModified ? '?pruneBefore=' + lastModified : '')),
+			{ headers }
+		)
 		.then(response => {
+			console.debug('Response length: ' + response.headers['content-length'])
 			store.commit('setSettings', response.data.settings)
 			store.commit('setCategories', response.data.categories)
 			if (response.data.notes !== null) {
-				store.dispatch('addAll', response.data.notes)
+				store.dispatch('updateNotes', response.data.notes)
 			}
 			if (response.data.errorMessage) {
 				showError(response.data.errorMessage)
 			}
+			const etag = response.headers['etag']
+			if (etag) {
+				store.commit('setSyncETag', etag)
+			}
+			const lastModified = Date.parse(response.headers['last-modified'])
+			if (lastModified) {
+				store.commit('setSyncLastModified', lastModified / 1000)
+			}
 			return response.data
 		})
 		.catch(err => {
-			console.error(err)
-			handleSyncError(t('notes', 'Fetching notes has failed.'))
-			throw err
+			if (err.response && err.response.status === 304) {
+				return null
+			} else {
+				console.error(err)
+				handleSyncError(t('notes', 'Fetching notes has failed.'))
+				throw err
+			}
 		})
 }
 
@@ -63,7 +85,7 @@ export const fetchNote = noteId => {
 			const localNote = store.getters.getNote(parseInt(noteId))
 			// only overwrite if there are no unsaved changes
 			if (!localNote || !localNote.unsaved) {
-				store.commit('add', response.data)
+				store.commit('updateNote', response.data)
 			}
 			return response.data
 		})
@@ -97,7 +119,7 @@ export const createNote = category => {
 	return axios
 		.post(url('/notes'), { category: category })
 		.then(response => {
-			store.commit('add', response.data)
+			store.commit('updateNote', response.data)
 			return response.data
 		})
 		.catch(err => {
@@ -122,7 +144,7 @@ function _updateNote(note) {
 			if (updated.content === note.content) {
 				note.unsaved = false
 			}
-			store.commit('add', note)
+			store.commit('updateNote', note)
 			return note
 		})
 		.catch(err => {
@@ -140,7 +162,7 @@ export const undoDeleteNote = (note) => {
 	return axios
 		.post(url('/notes/undo'), note)
 		.then(response => {
-			store.commit('add', response.data)
+			store.commit('updateNote', response.data)
 			return response.data
 		})
 		.catch(err => {
@@ -159,13 +181,13 @@ export const deleteNote = noteId => {
 	return axios
 		.delete(url('/notes/' + noteId))
 		.then(() => {
-			store.commit('remove', noteId)
+			store.commit('removeNote', noteId)
 		})
 		.catch(err => {
 			console.error(err)
 			handleSyncError(t('notes', 'Deleting note {id} has failed.', { id: noteId }))
 			// remove note always since we don't know when the error happened
-			store.commit('remove', noteId)
+			store.commit('removeNote', noteId)
 			throw err
 		})
 		.then(() => {
@@ -211,8 +233,8 @@ export const saveNote = (noteId, manualSave = false) => {
 }
 
 function _saveNotes() {
-	const unsavedNotes = Object.values(store.state.unsaved)
-	if (store.state.isSaving || unsavedNotes.length === 0) {
+	const unsavedNotes = Object.values(store.state.notes.unsaved)
+	if (store.state.app.isSaving || unsavedNotes.length === 0) {
 		return
 	}
 	store.commit('setSaving', true)
@@ -237,7 +259,7 @@ export const noteExists = (noteId) => {
 export const getCategories = (maxLevel, details) => {
 	const categories = store.getters.getCategories(maxLevel, details)
 	if (maxLevel === 0) {
-		return [...new Set([...categories, ...store.state.categories])]
+		return [...new Set([...categories, ...store.state.notes.categories])]
 	} else {
 		return categories
 	}
